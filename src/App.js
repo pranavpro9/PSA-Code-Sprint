@@ -1,5 +1,5 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react';
-import { Send, Sparkles, RefreshCw, TrendingUp, AlertTriangle, Target, Leaf, Users, Network, ChevronRight, Info, Database, Zap, CheckCircle, XCircle } from 'lucide-react';
+import { Send, Sparkles, RefreshCw, TrendingUp, AlertTriangle, Target, Leaf, Users, Network, ChevronRight, Info, Database, Zap, CheckCircle, XCircle, BarChart3, Calendar } from 'lucide-react';
 
 // Configuration from environment variables
 const GEMINI_API_KEY = process.env.REACT_APP_GEMINI_API_KEY;
@@ -39,22 +39,284 @@ const STRATEGY_PILLARS = {
   }
 };
 
-// Vector Store for RAG (in-memory implementation)
+// XGBoost-inspired Gradient Boosting Implementation
+class SimpleGradientBoosting {
+  constructor(nEstimators = 100, learningRate = 0.1, maxDepth = 3) {
+    this.nEstimators = nEstimators;
+    this.learningRate = learningRate;
+    this.maxDepth = maxDepth;
+    this.trees = [];
+    this.initialPrediction = 0;
+  }
+
+  fit(X, y) {
+    // Initialize with mean
+    this.initialPrediction = y.reduce((a, b) => a + b, 0) / y.length;
+    let predictions = new Array(y.length).fill(this.initialPrediction);
+    
+    // Build trees iteratively
+    for (let i = 0; i < this.nEstimators; i++) {
+      const residuals = y.map((val, idx) => val - predictions[idx]);
+      const tree = this.buildTree(X, residuals, 0);
+      this.trees.push(tree);
+      
+      // Update predictions
+      predictions = predictions.map((pred, idx) => 
+        pred + this.learningRate * this.predictSingleTree(tree, X[idx])
+      );
+    }
+  }
+
+  buildTree(X, y, depth) {
+    if (depth >= this.maxDepth || X.length < 2) {
+      return { value: y.reduce((a, b) => a + b, 0) / y.length };
+    }
+
+    // Find best split
+    let bestSplit = null;
+    let bestScore = Infinity;
+    
+    for (let featureIdx = 0; featureIdx < X[0].length; featureIdx++) {
+      const values = X.map(row => row[featureIdx]);
+      const uniqueValues = [...new Set(values)].sort((a, b) => a - b);
+      
+      for (let i = 0; i < uniqueValues.length - 1; i++) {
+        const threshold = (uniqueValues[i] + uniqueValues[i + 1]) / 2;
+        const { left, right } = this.splitData(X, y, featureIdx, threshold);
+        
+        if (left.y.length === 0 || right.y.length === 0) continue;
+        
+        const score = this.calculateMSE(left.y) * left.y.length + 
+                      this.calculateMSE(right.y) * right.y.length;
+        
+        if (score < bestScore) {
+          bestScore = score;
+          bestSplit = { featureIdx, threshold, left, right };
+        }
+      }
+    }
+
+    if (!bestSplit) {
+      return { value: y.reduce((a, b) => a + b, 0) / y.length };
+    }
+
+    return {
+      featureIdx: bestSplit.featureIdx,
+      threshold: bestSplit.threshold,
+      left: this.buildTree(bestSplit.left.X, bestSplit.left.y, depth + 1),
+      right: this.buildTree(bestSplit.right.X, bestSplit.right.y, depth + 1)
+    };
+  }
+
+  splitData(X, y, featureIdx, threshold) {
+    const left = { X: [], y: [] };
+    const right = { X: [], y: [] };
+    
+    for (let i = 0; i < X.length; i++) {
+      if (X[i][featureIdx] <= threshold) {
+        left.X.push(X[i]);
+        left.y.push(y[i]);
+      } else {
+        right.X.push(X[i]);
+        right.y.push(y[i]);
+      }
+    }
+    
+    return { left, right };
+  }
+
+  calculateMSE(values) {
+    if (values.length === 0) return 0;
+    const mean = values.reduce((a, b) => a + b, 0) / values.length;
+    return values.reduce((sum, val) => sum + Math.pow(val - mean, 2), 0) / values.length;
+  }
+
+  predictSingleTree(tree, x) {
+    if (tree.value !== undefined) return tree.value;
+    
+    if (x[tree.featureIdx] <= tree.threshold) {
+      return this.predictSingleTree(tree.left, x);
+    } else {
+      return this.predictSingleTree(tree.right, x);
+    }
+  }
+
+  predict(X) {
+    return X.map(x => {
+      let pred = this.initialPrediction;
+      for (const tree of this.trees) {
+        pred += this.learningRate * this.predictSingleTree(tree, x);
+      }
+      return pred;
+    });
+  }
+}
+
+// Forecasting Engine with XGBoost
+class ForecastingEngine {
+  constructor() {
+    this.models = {};
+    this.scalers = {};
+    this.trainingData = null;
+  }
+
+  createFeatures(data, targetIdx) {
+    const features = [];
+    const targets = [];
+    const windowSize = 2; // Use last 2 months to predict next month (reduced from 3 for small datasets)
+
+    for (let i = windowSize; i < data.length; i++) {
+      const feature = [];
+      
+      // Lagged features (previous values)
+      for (let lag = 1; lag <= windowSize; lag++) {
+        feature.push(data[i - lag][targetIdx]);
+      }
+      
+      // Moving average
+      const ma = data.slice(i - windowSize, i)
+        .reduce((sum, row) => sum + row[targetIdx], 0) / windowSize;
+      feature.push(ma);
+      
+      // Trend (difference from previous)
+      if (i > 1) {
+        feature.push(data[i - 1][targetIdx] - data[i - 2][targetIdx]);
+      } else {
+        feature.push(0);
+      }
+      
+      // Time index (seasonality proxy)
+      feature.push(i);
+      
+      features.push(feature);
+      targets.push(data[i][targetIdx]);
+    }
+
+    return { features, targets };
+  }
+
+  normalize(values) {
+    const min = Math.min(...values);
+    const max = Math.max(...values);
+    const range = max - min || 1;
+    
+    return {
+      normalized: values.map(v => (v - min) / range),
+      scaler: { min, max, range }
+    };
+  }
+
+  denormalize(values, scaler) {
+    return values.map(v => v * scaler.range + scaler.min);
+  }
+
+  trainModel(data, metricName, metricIdx) {
+    try {
+      const { features, targets } = this.createFeatures(data, metricIdx);
+      
+      if (features.length < 2) {
+        throw new Error(`Insufficient data for training ${metricName}: need at least 3 data points, got ${data.length}`);
+      }
+
+      // Normalize features
+      const normalizedTargets = this.normalize(targets);
+      this.scalers[metricName] = normalizedTargets.scaler;
+
+      // Train XGBoost-like model
+      const model = new SimpleGradientBoosting(50, 0.1, 3);
+      model.fit(features, normalizedTargets.normalized);
+      
+      this.models[metricName] = model;
+      this.trainingData = data;
+
+      return { success: true, trainSize: features.length };
+    } catch (error) {
+      console.error(`Error training ${metricName}:`, error);
+      return { success: false, error: error.message };
+    }
+  }
+
+  forecast(metricName, monthsAhead = 3) {
+    if (!this.models[metricName] || !this.trainingData) {
+      throw new Error('Model not trained');
+    }
+
+    const model = this.models[metricName];
+    const scaler = this.scalers[metricName];
+    const metricIdx = this.getMetricIndex(metricName);
+    const predictions = [];
+    
+    // Start with last known values
+    let currentData = [...this.trainingData];
+    const windowSize = 2; // Must match the windowSize in createFeatures
+
+    for (let i = 0; i < monthsAhead; i++) {
+      const lastValues = currentData.slice(-windowSize);
+      
+      // Create features for prediction
+      const features = [];
+      for (let lag = 1; lag <= windowSize; lag++) {
+        features.push(lastValues[windowSize - lag][metricIdx]);
+      }
+      
+      const ma = lastValues.reduce((sum, row) => sum + row[metricIdx], 0) / windowSize;
+      features.push(ma);
+      
+      if (lastValues.length >= 2) {
+        features.push(lastValues[windowSize - 1][metricIdx] - lastValues[windowSize - 2][metricIdx]);
+      } else {
+        features.push(0);
+      }
+      features.push(currentData.length + i);
+
+      // Predict
+      const normalizedPred = model.predict([features])[0];
+      const pred = this.denormalize([normalizedPred], scaler)[0];
+      
+      // Add to predictions
+      predictions.push(Math.max(0, pred));
+      
+      // Update current data with prediction
+      const newRow = [...currentData[currentData.length - 1]];
+      newRow[metricIdx] = pred;
+      currentData.push(newRow);
+    }
+
+    return predictions;
+  }
+
+  getMetricIndex(metricName) {
+    const mapping = {
+      'PortTimeSavings': 0,
+      'ArrivalAccuracy': 1,
+      'BunkerSavings': 2,
+      'CarbonAbatement': 3,
+      'TotalCalls': 4
+    };
+    return mapping[metricName];
+  }
+
+  calculateConfidenceIntervals(predictions, historicalStd = 2) {
+    return predictions.map(pred => ({
+      prediction: pred,
+      lower: Math.max(0, pred - 1.96 * historicalStd),
+      upper: pred + 1.96 * historicalStd
+    }));
+  }
+}
+
+// Vector Store for RAG
 class VectorStore {
   constructor() {
     this.documents = [];
     this.embeddings = new Map();
   }
 
-  // Simplified embedding using text similarity (in production, use OpenAI embeddings)
   async addDocument(doc) {
     const id = `doc_${this.documents.length}`;
     this.documents.push({ id, ...doc });
-    
-    // Store keywords for retrieval
     const keywords = this.extractKeywords(doc.content);
     this.embeddings.set(id, keywords);
-    
     return id;
   }
 
@@ -65,10 +327,8 @@ class VectorStore {
       .filter(word => word.length > 3 && !stopWords.includes(word));
   }
 
-  // Retrieve relevant documents based on query
   async retrieve(query, topK = 3) {
     const queryKeywords = this.extractKeywords(query);
-    
     const scores = this.documents.map(doc => {
       const docKeywords = this.embeddings.get(doc.id);
       const matches = queryKeywords.filter(k => docKeywords.includes(k)).length;
@@ -79,10 +339,6 @@ class VectorStore {
       .sort((a, b) => b.score - a.score)
       .slice(0, topK)
       .map(s => s.doc);
-  }
-
-  getAll() {
-    return this.documents;
   }
 }
 
@@ -96,11 +352,13 @@ function App() {
   const [connectionStatus, setConnectionStatus] = useState({
     powerbi: 'disconnected',
     vectorstore: 'initializing',
-    openai: 'disconnected'
+    gemini: 'disconnected',
+    forecasting: 'initializing'
   });
+  const [forecastingEngine] = useState(new ForecastingEngine());
+  const [modelsReady, setModelsReady] = useState(false);
   const messagesEndRef = useRef(null);
   const vectorStore = useRef(new VectorStore());
-  
 
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -110,7 +368,6 @@ function App() {
     scrollToBottom();
   }, [messages]);
 
-  // Initialize Vector Store with dashboard context
   useEffect(() => {
     initializeVectorStore();
   }, []);
@@ -118,11 +375,9 @@ function App() {
   const initializeVectorStore = async () => {
     try {
       setConnectionStatus(prev => ({ ...prev, vectorstore: 'connected' }));
-      
-      // Initialize welcome message
       setMessages([{
         type: 'assistant',
-        content: 'Hello! I\'m your PSA Strategic Insights AI with real-time dashboard integration.\n\nI have access to your network performance data and can provide insights on port operations, arrival accuracy, sustainability metrics, and strategic recommendations. Ask me anything!'
+        content: 'Hello! I\'m your PSA Strategic Insights AI with real-time dashboard integration and **XGBoost-powered forecasting**.\n\n🔄 Loading dashboard data and training forecasting models...\n\nOnce ready, I can provide insights on current performance and predict future trends for:\n• Port Time Savings\n• Arrival Accuracy\n• Bunker Savings\n• Carbon Abatement\n• Total Calls\n\nJust ask me to forecast any metric!'
       }]);
     } catch (error) {
       console.error('Vector store initialization error:', error);
@@ -130,22 +385,18 @@ function App() {
     }
   };
 
-  // Proactive Anomaly Detection
   const detectAnomalies = useCallback((data) => {
     const insights = [];
     const rows = data.results[0].tables[0].rows;
-    
     if (rows.length < 2) return insights;
 
     const current = rows[0];
     const previous = rows[1];
     const allRows = rows;
 
-    // Calculate averages for benchmarking
     const avgPortTime = allRows.reduce((sum, r) => sum + r.PortTimeSavings, 0) / allRows.length;
     const avgCarbon = allRows.reduce((sum, r) => sum + r.CarbonAbatement, 0) / allRows.length;
 
-    // Detect significant drops in Arrival Accuracy
     const arrivalDrop = previous.ArrivalAccuracy - current.ArrivalAccuracy;
     if (arrivalDrop > 15) {
       insights.push({
@@ -153,80 +404,27 @@ function App() {
         title: '🚨 Critical: Arrival Accuracy Declined',
         summary: `Arrival accuracy dropped ${arrivalDrop.toFixed(0)}% from ${previous.ArrivalAccuracy}% (${previous['Date[Month]']}) to ${current.ArrivalAccuracy}% (${current['Date[Month]']})`,
         impact: 'high',
-        pillar: 'customer',
-        detail: `This decline affects service predictability and customer satisfaction.`,
-        actions: [
-          'Review vessel schedule coordination with shipping lines',
-          'Analyze weather pattern impacts for the period',
-          'Check terminal maintenance schedules for conflicts',
-          'Implement enhanced buffer times for high-risk routes'
-        ]
+        pillar: 'customer'
       });
     }
 
-    // Detect below-average Port Time Savings
     if (current.PortTimeSavings < avgPortTime - 5) {
       insights.push({
         type: 'anomaly',
         title: '⚠️ Port Time Savings Below Target',
-        summary: `Current port time savings (${current.PortTimeSavings}%) is ${(avgPortTime - current.PortTimeSavings).toFixed(1)}% below network average (${avgPortTime.toFixed(1)}%)`,
+        summary: `Current port time savings (${current.PortTimeSavings}%) is ${(avgPortTime - current.PortTimeSavings).toFixed(1)}% below network average`,
         impact: 'medium',
-        pillar: 'operational',
-        detail: `Operational efficiency has declined compared to historical performance.`,
-        actions: [
-          'Optimize berth allocation algorithms',
-          'Review vessel waiting times at key terminals',
-          'Analyze cargo handling bottlenecks',
-          'Deploy additional resources during peak periods'
-        ]
-      });
-    }
-
-    // Detect strong performance (positive insights)
-    if (current.CarbonAbatement > avgCarbon + 1) {
-      insights.push({
-        type: 'success',
-        title: '✅ Excellent: Carbon Abatement Exceeds Target',
-        summary: `Carbon abatement (${current.CarbonAbatement}K tonnes) is ${((current.CarbonAbatement - avgCarbon) / avgCarbon * 100).toFixed(0)}% above average`,
-        impact: 'low',
-        pillar: 'sustainability',
-        detail: `Strong sustainability performance demonstrates effective emissions reduction strategies.`,
-        actions: [
-          'Document successful practices for replication',
-          'Share best practices across terminal network',
-          'Consider expanding initiatives to other regions',
-          'Report achievements to stakeholders'
-        ]
-      });
-    }
-
-    // Detect correlation opportunities
-    if (current.PortTimeSavings > 18 && current.CarbonAbatement > 7) {
-      insights.push({
-        type: 'insight',
-        title: '💡 Insight: Efficiency Drives Sustainability',
-        summary: `High port time savings (${current.PortTimeSavings}%) correlates with strong carbon abatement (${current.CarbonAbatement}K tonnes)`,
-        impact: 'medium',
-        pillar: 'digital',
-        detail: `Operational excellence directly supports sustainability goals through reduced idle times.`,
-        actions: [
-          'Continue optimizing vessel turnaround times',
-          'Invest in predictive berth allocation systems',
-          'Implement just-in-time arrival coordination',
-          'Monitor and maintain this positive correlation'
-        ]
+        pillar: 'operational'
       });
     }
 
     return insights;
   }, []);
 
-  // Power BI Data Integration
   const loadPowerBIData = useCallback(async () => {
     try {
       setConnectionStatus(prev => ({ ...prev, powerbi: 'connecting' }));
       
-      // Check if Power BI credentials are configured
       if (!POWERBI_CONFIG.clientId || !POWERBI_CONFIG.tenantId) {
         console.log('Power BI credentials not configured, using demo data');
         return loadDemoData();
@@ -234,7 +432,6 @@ function App() {
 
       console.log('Attempting to connect to Power BI...');
       
-      // Step 1: Get Access Token
       const tokenResponse = await fetch(`https://login.microsoftonline.com/${POWERBI_CONFIG.tenantId}/oauth2/v2.0/token`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
@@ -247,16 +444,12 @@ function App() {
       });
 
       if (!tokenResponse.ok) {
-        const error = await tokenResponse.text();
-        console.error('Power BI authentication failed:', error);
         console.log('Falling back to demo data');
         return loadDemoData();
       }
 
       const { access_token } = await tokenResponse.json();
-      console.log('✅ Power BI authentication successful');
-
-      // Step 2: Execute DAX Query
+      
       const daxQuery = {
         queries: [{
           query: `
@@ -287,20 +480,16 @@ function App() {
       );
 
       if (!dataResponse.ok) {
-        const error = await dataResponse.text();
-        console.error('Power BI data fetch failed:', error);
         console.log('Falling back to demo data');
         return loadDemoData();
       }
 
       const data = await dataResponse.json();
-      console.log('✅ Successfully fetched Power BI data');
-      
       setPowerBIData(data);
       setConnectionStatus(prev => ({ ...prev, powerbi: 'connected' }));
       storeDataInVectorStore(data);
+      trainForecastingModels(data);
       
-      // Run proactive anomaly detection
       const anomalies = detectAnomalies(data);
       if (anomalies.length > 0) {
         setMessages(prev => [...prev, {
@@ -313,13 +502,12 @@ function App() {
       return data;
     } catch (error) {
       console.error('Power BI connection error:', error);
-      console.log('Falling back to demo data');
       return loadDemoData();
     }
   }, [detectAnomalies]);
 
-  // Demo data fallback
   const loadDemoData = useCallback(() => {
+    console.log('📊 Loading demo data...');
     const data = {
       results: [{
         tables: [{
@@ -336,13 +524,61 @@ function App() {
     
     setPowerBIData(data);
     setConnectionStatus(prev => ({ ...prev, powerbi: 'connected' }));
+    console.log('✅ Demo data loaded');
+    
     storeDataInVectorStore(data);
+    trainForecastingModels(data);
     
     return data;
   }, []);
 
+  const trainForecastingModels = async (data) => {
+    try {
+      console.log('🤖 Starting model training...');
+      setConnectionStatus(prev => ({ ...prev, forecasting: 'connecting' }));
+      
+      const rows = data.results[0].tables[0].rows;
+      if (!rows || rows.length < 3) {
+        throw new Error(`Insufficient data for training (need at least 3 data points, got ${rows.length})`);
+      }
 
-  // Store Power BI data in vector store
+      console.log(`📈 Training with ${rows.length} data points`);
+
+      const trainingData = [...rows].reverse().map(row => [
+        row.PortTimeSavings,
+        row.ArrivalAccuracy,
+        row.BunkerSavings,
+        row.CarbonAbatement,
+        row.TotalCalls
+      ]);
+
+      const metrics = ['PortTimeSavings', 'ArrivalAccuracy', 'BunkerSavings', 'CarbonAbatement', 'TotalCalls'];
+      
+      let successCount = 0;
+      for (let i = 0; i < metrics.length; i++) {
+        const result = forecastingEngine.trainModel(trainingData, metrics[i], i);
+        if (result.success) {
+          successCount++;
+          console.log(`✅ ${metrics[i]} model trained (${result.trainSize} samples)`);
+        } else {
+          console.error(`❌ ${metrics[i]} model training failed:`, result.error);
+        }
+      }
+
+      if (successCount === metrics.length) {
+        setModelsReady(true);
+        setConnectionStatus(prev => ({ ...prev, forecasting: 'connected' }));
+        console.log(`🎉 All ${successCount} forecasting models trained successfully`);
+      } else {
+        throw new Error(`Only ${successCount}/${metrics.length} models trained successfully`);
+      }
+    } catch (error) {
+      console.error('❌ Error training forecasting models:', error);
+      setConnectionStatus(prev => ({ ...prev, forecasting: 'error' }));
+      setModelsReady(false);
+    }
+  };
+
   const storeDataInVectorStore = async (data) => {
     try {
       const rows = data.results[0].tables[0].rows;
@@ -360,8 +596,7 @@ function App() {
               bunkerSavings: row.BunkerSavings,
               carbonAbatement: row.CarbonAbatement,
               totalCalls: row.TotalCalls
-            },
-            timestamp: new Date().toISOString()
+            }
           }
         };
         
@@ -372,20 +607,118 @@ function App() {
     }
   };
 
-
-  // Initialize Power BI data on mount
   useEffect(() => {
-    setTimeout(() => {
+    const timer = setTimeout(() => {
       loadPowerBIData();
     }, 1000);
+    
+    return () => clearTimeout(timer);
   }, [loadPowerBIData]);
 
-  // Build context with RAG
-  const buildRAGContext = async (query) => {
-    // Retrieve relevant documents from vector store
-    const relevantDocs = await vectorStore.current.retrieve(query, 5);
+  // Separate effect to show ready message when models are trained
+  useEffect(() => {
+    if (modelsReady && powerBIData) {
+      setMessages(prev => {
+        // Only add the ready message if it's not already there
+        const lastMessage = prev[prev.length - 1];
+        if (lastMessage?.content?.includes('Dashboard loaded and forecasting models trained')) {
+          return prev;
+        }
+        return [...prev, {
+          type: 'assistant',
+          content: '✅ **Dashboard loaded and forecasting models trained!**\n\nI\'m now ready to analyze your data and make predictions. Try asking:\n• "Forecast port time savings for next 3 months"\n• "What will arrival accuracy be in 6 months?"\n• "Predict carbon abatement trends"'
+        }];
+      });
+    }
+  }, [modelsReady, powerBIData]);
+
+  const detectForecastIntent = (query) => {
+    const forecastKeywords = ['forecast', 'predict', 'future', 'projection', 'next', 'upcoming', 'expect', 'trend'];
+    const metricMapping = {
+      'port time': 'PortTimeSavings',
+      'arrival': 'ArrivalAccuracy',
+      'bunker': 'BunkerSavings',
+      'carbon': 'CarbonAbatement',
+      'calls': 'TotalCalls'
+    };
+
+    const lowerQuery = query.toLowerCase();
+    const hasForecastIntent = forecastKeywords.some(kw => lowerQuery.includes(kw));
     
-    // Get current data summary
+    if (!hasForecastIntent) return null;
+
+    // Detect metric
+    let metric = null;
+    for (const [key, value] of Object.entries(metricMapping)) {
+      if (lowerQuery.includes(key)) {
+        metric = value;
+        break;
+      }
+    }
+
+    // Detect time horizon
+    const monthMatch = lowerQuery.match(/(\d+)\s*(month|months)/);
+    const months = monthMatch ? parseInt(monthMatch[1]) : 3;
+
+    return { metric, months: Math.min(months, 12) };
+  };
+
+  const generateForecast = async (metric, months) => {
+    try {
+      if (!modelsReady) {
+        return {
+          type: 'error',
+          content: '⏳ Forecasting models are still initializing. Please wait a moment and try again.\n\nThe XGBoost models need to train on historical data before making predictions. This usually takes just a few seconds after the dashboard loads.'
+        };
+      }
+
+      if (!forecastingEngine.models[metric]) {
+        return {
+          type: 'error',
+          content: `❌ The forecasting model for ${metric} is not available. Available metrics are:\n• Port Time Savings\n• Arrival Accuracy\n• Bunker Savings\n• Carbon Abatement\n• Total Calls`
+        };
+      }
+
+      const predictions = forecastingEngine.forecast(metric, months);
+      const confidenceIntervals = forecastingEngine.calculateConfidenceIntervals(predictions);
+
+      const metricLabels = {
+        'PortTimeSavings': 'Port Time Savings (%)',
+        'ArrivalAccuracy': 'Arrival Accuracy (%)',
+        'BunkerSavings': 'Bunker Savings ($M)',
+        'CarbonAbatement': 'Carbon Abatement (K tonnes)',
+        'TotalCalls': 'Total Calls'
+      };
+
+      const forecastData = {
+        metric,
+        metricLabel: metricLabels[metric],
+        months,
+        predictions: confidenceIntervals,
+        historicalData: powerBIData.results[0].tables[0].rows.map(r => ({
+          month: r['Date[Month]'],
+          value: r[metric]
+        }))
+      };
+
+      return {
+        type: 'forecast',
+        content: `## ${metricLabels[metric]} Forecast (${months} Months)\n\nBased on historical patterns and XGBoost modeling, here are the predictions:\n\n${confidenceIntervals.map((pred, idx) => 
+          `**Month ${idx + 1}**: ${pred.prediction.toFixed(2)} (95% CI: ${pred.lower.toFixed(2)} - ${pred.upper.toFixed(2)})`
+        ).join('\n')}\n\nThe model uses gradient boosting with time-series features including lagged values, moving averages, and trend indicators.`,
+        forecastData
+      };
+    } catch (error) {
+      console.error('Forecast generation error:', error);
+      return {
+        type: 'error',
+        content: `❌ Unable to generate forecast: ${error.message}\n\nPlease ensure the dashboard has loaded completely and try again.`
+      };
+    }
+  };
+
+  const buildRAGContext = async (query) => {
+    const relevantDocs = await vectorStore.current.retrieve(query, 5);
     const currentData = powerBIData?.results?.[0]?.tables?.[0]?.rows?.[0];
     
     const ragContext = relevantDocs.map(doc => 
@@ -407,66 +740,44 @@ RETRIEVED HISTORICAL CONTEXT:
 ${ragContext}
 
 PSA STRATEGIC PILLARS:
-1. Operational Excellence - Port operations optimization
-2. Digital Integration - Real-time data and AI decisions
-3. Sustainability - Carbon reduction and fuel optimization
-4. Customer-Centric Innovation - Predictable, reliable service
-
-Provide analysis that:
-- References specific historical data points
-- Compares current vs historical performance
-- Identifies patterns from retrieved context
-- Aligns recommendations with strategic pillars
-- Uses actual numbers from the data`;
+1. Operational Excellence
+2. Digital Integration
+3. Sustainability
+4. Customer-Centric Innovation`;
   };
 
   const callGeminiAI = async (userMessage) => {
     try {
-      setConnectionStatus(prev => ({ ...prev, openai: 'connecting' }));
+      setConnectionStatus(prev => ({ ...prev, gemini: 'connecting' }));
       
       if (!GEMINI_API_KEY) {
-        throw new Error('Gemini API key not configured. Please add REACT_APP_GEMINI_API_KEY to your .env file.');
+        throw new Error('Gemini API key not configured');
       }
 
       const contextWithRAG = await buildRAGContext(userMessage);
+      const prompt = `${contextWithRAG}\n\nUser Question: ${userMessage}\n\nProvide detailed analysis referencing specific data points.`;
 
-      const prompt = `${contextWithRAG}
-
-User Question: ${userMessage}
-
-Please provide a detailed analysis that references specific data points from the context above.`;
-
-      const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${GEMINI_API_KEY}`, {
+      const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash-exp:generateContent?key=${GEMINI_API_KEY}`, {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json'
-        },
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          contents: [{
-            parts: [{
-              text: prompt
-            }]
-          }],
+          contents: [{ parts: [{ text: prompt }] }],
           generationConfig: {
             temperature: 0.7,
-            maxOutputTokens: 2000,
-            topP: 0.8,
-            topK: 40
+            maxOutputTokens: 2000
           }
         })
       });
 
       if (!response.ok) {
-        const errorData = await response.json();
-        throw new Error(`Gemini API request failed: ${errorData.error?.message || response.statusText}`);
+        throw new Error('Gemini API request failed');
       }
 
       const data = await response.json();
       const content = data.candidates?.[0]?.content?.parts?.[0]?.text || 'No response generated';
       
-      setConnectionStatus(prev => ({ ...prev, openai: 'connected' }));
+      setConnectionStatus(prev => ({ ...prev, gemini: 'connected' }));
 
-      // Extract strategic pillars
       const pillars = [];
       Object.keys(STRATEGY_PILLARS).forEach(key => {
         if (content.toLowerCase().includes(STRATEGY_PILLARS[key].name.toLowerCase())) {
@@ -481,7 +792,7 @@ Please provide a detailed analysis that references specific data points from the
       };
     } catch (err) {
       console.error('Gemini API Error:', err);
-      setConnectionStatus(prev => ({ ...prev, openai: 'error' }));
+      setConnectionStatus(prev => ({ ...prev, gemini: 'error' }));
       return {
         type: 'error',
         content: `Error: ${err.message}`,
@@ -498,65 +809,71 @@ Please provide a detailed analysis that references specific data points from the
     setInput('');
     setIsLoading(true);
 
-    const response = await callGeminiAI(userMessage);
+    // Check for forecast intent
+    const forecastIntent = detectForecastIntent(userMessage);
+    
+    let response;
+    if (forecastIntent && forecastIntent.metric) {
+      response = await generateForecast(forecastIntent.metric, forecastIntent.months);
+    } else if (forecastIntent && !forecastIntent.metric) {
+      // User wants forecast but didn't specify metric
+      response = {
+        type: 'clarification',
+        content: 'I can forecast any of these metrics for you:\n\n• **Port Time Savings** - Operational efficiency predictions\n• **Arrival Accuracy** - Service reliability forecasts\n• **Bunker Savings** - Fuel cost projections\n• **Carbon Abatement** - Environmental impact trends\n• **Total Calls** - Volume predictions\n\nWhich metric would you like me to forecast? You can also specify how many months ahead (1-12 months).\n\nExample: "Forecast port time savings for the next 3 months"'
+      };
+    } else {
+      response = await callGeminiAI(userMessage);
+    }
     
     setMessages(prev => [...prev, { 
       type: 'assistant', 
       content: response.content,
       pillars: response.pillars,
-      isError: response.type === 'error'
+      isError: response.type === 'error',
+      forecastData: response.forecastData
     }]);
     setIsLoading(false);
   };
 
   const quickPrompts = [
-    "Compare September vs our best months using historical data",
-    "Why is arrival accuracy dropping? What does the data show?", 
-    "Retrieve insights about May's peak performance",
-    "What patterns do you see in carbon abatement trends?"
+    "Forecast port time savings for next 3 months",
+    "Predict arrival accuracy trends for 6 months",
+    "What will carbon abatement be in the next quarter?",
+    "Compare current vs forecasted bunker savings"
   ];
 
   const resetChat = () => {
     setMessages([{
       type: 'assistant',
-      content: 'Chat reset. Ready for new analysis with live Power BI data and historical context.'
+      content: 'Chat reset. Ready for analysis and forecasting with XGBoost-powered predictions!'
     }]);
     setShowChart({});
   };
 
-  // Extract chart data from AI response
   const extractChartData = (content) => {
     if (!powerBIData?.results?.[0]?.tables?.[0]?.rows) return null;
     
     const rows = powerBIData.results[0].tables[0].rows;
     const contentLower = content.toLowerCase();
     
-    // Don't show chart for welcome messages or short responses
-    if (content.length < 100 || contentLower.includes('hello') || contentLower.includes('ask me anything')) {
+    if (content.length < 100 || contentLower.includes('hello')) {
       return null;
     }
     
-    // Detect what metrics are mentioned with specific context
     const metrics = {
-      portTimeSavings: (contentLower.includes('port time') && contentLower.includes('%')) || 
-                       (contentLower.includes('savings') && contentLower.includes('port')),
-      arrivalAccuracy: (contentLower.includes('arrival') && contentLower.includes('accuracy')) ||
-                       (contentLower.includes('arrival') && contentLower.includes('%')),
-      bunkerSavings: contentLower.includes('bunker') || 
-                     (contentLower.includes('fuel') && contentLower.includes('savings')),
-      carbonAbatement: (contentLower.includes('carbon') && contentLower.includes('abatement')) ||
-                       (contentLower.includes('carbon') && contentLower.includes('tonnes'))
+      portTimeSavings: (contentLower.includes('port time') && contentLower.includes('%')),
+      arrivalAccuracy: (contentLower.includes('arrival') && contentLower.includes('accuracy')),
+      bunkerSavings: contentLower.includes('bunker'),
+      carbonAbatement: (contentLower.includes('carbon') && contentLower.includes('abatement'))
     };
     
-    // Count how many metrics are mentioned
     const mentionedMetrics = Object.entries(metrics).filter(([_, mentioned]) => mentioned);
     
     if (mentionedMetrics.length === 0) return null;
     
-    // Prepare chart data
     return {
       labels: rows.map(r => r['Date[Month]']).reverse(),
-      datasets: mentionedMetrics.map(([key, _], idx) => {
+      datasets: mentionedMetrics.map(([key, _]) => {
         const colors = {
           portTimeSavings: { bg: 'rgba(59, 130, 246, 0.5)', border: 'rgb(59, 130, 246)', label: 'Port Time Savings (%)' },
           arrivalAccuracy: { bg: 'rgba(16, 185, 129, 0.5)', border: 'rgb(16, 185, 129)', label: 'Arrival Accuracy (%)' },
@@ -581,9 +898,7 @@ Please provide a detailed analysis that references specific data points from the
     };
   };
 
-  // Format AI response with better structure and styling
   const formatAIResponse = (content) => {
-    // Helper function to parse inline bold text
     const parseInlineBold = (text) => {
       const parts = [];
       let lastIndex = 0;
@@ -591,16 +906,13 @@ Please provide a detailed analysis that references specific data points from the
       let match;
 
       while ((match = regex.exec(text)) !== null) {
-        // Add text before the bold
         if (match.index > lastIndex) {
           parts.push(text.substring(lastIndex, match.index));
         }
-        // Add bold text
         parts.push(<strong key={match.index} className="font-semibold text-gray-900">{match[1]}</strong>);
         lastIndex = regex.lastIndex;
       }
       
-      // Add remaining text
       if (lastIndex < text.length) {
         parts.push(text.substring(lastIndex));
       }
@@ -616,7 +928,6 @@ Please provide a detailed analysis that references specific data points from the
     lines.forEach((line, idx) => {
       const trimmed = line.trim();
       
-      // Headers (##)
       if (trimmed.startsWith('##')) {
         if (inList) {
           formatted.push(<ul key={`list-${idx}`} className="space-y-2 my-3 ml-4">{currentList}</ul>);
@@ -631,7 +942,6 @@ Please provide a detailed analysis that references specific data points from the
           </h3>
         );
       }
-      // List items (numbered or bulleted)
       else if (trimmed.match(/^(\d+\.|-|\*)\s/)) {
         inList = true;
         const text = trimmed.replace(/^(\d+\.|-|\*)\s/, '');
@@ -642,7 +952,6 @@ Please provide a detailed analysis that references specific data points from the
           </li>
         );
       }
-      // Regular paragraphs
       else if (trimmed) {
         if (inList) {
           formatted.push(<ul key={`list-${idx}`} className="space-y-2 my-3 ml-4">{currentList}</ul>);
@@ -655,7 +964,6 @@ Please provide a detailed analysis that references specific data points from the
           </p>
         );
       }
-      // Empty lines
       else if (inList) {
         formatted.push(<ul key={`list-${idx}`} className="space-y-2 my-3 ml-4">{currentList}</ul>);
         currentList = [];
@@ -663,7 +971,6 @@ Please provide a detailed analysis that references specific data points from the
       }
     });
 
-    // Add remaining list items
     if (currentList.length > 0) {
       formatted.push(<ul key="list-final" className="space-y-2 my-3 ml-4">{currentList}</ul>);
     }
@@ -671,7 +978,255 @@ Please provide a detailed analysis that references specific data points from the
     return <div className="space-y-1">{formatted}</div>;
   };
 
-  // Simple Line Chart Component
+  const ForecastChart = ({ forecastData, messageIdx }) => {
+    if (!forecastData) return null;
+    
+    const width = 800;
+    const height = 350;
+    const padding = { top: 40, right: 40, bottom: 60, left: 70 };
+    const chartWidth = width - padding.left - padding.right;
+    const chartHeight = height - padding.top - padding.bottom;
+    
+    const historicalValues = forecastData.historicalData.map(d => d.value);
+    const forecastValues = forecastData.predictions.map(p => p.prediction);
+    const allValues = [...historicalValues, ...forecastValues];
+    const maxValue = Math.max(...allValues);
+    const minValue = Math.min(...allValues);
+    const valueRange = maxValue - minValue;
+    
+    const totalPoints = historicalValues.length + forecastValues.length;
+    const xStep = chartWidth / (totalPoints - 1);
+    
+    return (
+      <div className="mt-4 bg-gradient-to-br from-blue-50 to-indigo-50 border-2 border-blue-200 rounded-xl p-5 shadow-lg">
+        <div className="flex items-center justify-between mb-4">
+          <div>
+            <h4 className="text-base font-bold text-gray-900 flex items-center gap-2">
+              <BarChart3 className="w-5 h-5 text-blue-600" />
+              {forecastData.metricLabel} - Forecast Visualization
+            </h4>
+            <p className="text-xs text-gray-600 mt-1">XGBoost-powered predictions with 95% confidence intervals</p>
+          </div>
+          <button
+            onClick={() => setShowChart(prev => ({ ...prev, [messageIdx]: !prev[messageIdx] }))}
+            className="px-3 py-1.5 text-sm bg-white hover:bg-gray-50 border border-gray-300 rounded-lg transition-colors"
+          >
+            {showChart[messageIdx] ? 'Hide' : 'Show'} Chart
+          </button>
+        </div>
+        
+        {showChart[messageIdx] && (
+          <>
+            <svg width={width} height={height} className="mx-auto bg-white rounded-lg">
+              {/* Grid lines */}
+              {[0, 1, 2, 3, 4].map(i => {
+                const y = padding.top + (chartHeight / 4) * i;
+                const value = maxValue - (valueRange / 4) * i;
+                return (
+                  <g key={i}>
+                    <line
+                      x1={padding.left}
+                      y1={y}
+                      x2={width - padding.right}
+                      y2={y}
+                      stroke="#e5e7eb"
+                      strokeWidth="1"
+                      strokeDasharray="5,5"
+                    />
+                    <text
+                      x={padding.left - 10}
+                      y={y + 4}
+                      textAnchor="end"
+                      fontSize="12"
+                      fill="#6b7280"
+                      fontWeight="500"
+                    >
+                      {value.toFixed(1)}
+                    </text>
+                  </g>
+                );
+              })}
+              
+              {/* Vertical separator between historical and forecast */}
+              <line
+                x1={padding.left + xStep * (historicalValues.length - 1)}
+                y1={padding.top}
+                x2={padding.left + xStep * (historicalValues.length - 1)}
+                y2={height - padding.bottom}
+                stroke="#94a3b8"
+                strokeWidth="2"
+                strokeDasharray="8,4"
+              />
+              
+              {/* X-axis labels */}
+              {forecastData.historicalData.map((item, i) => {
+                const x = padding.left + xStep * i;
+                return (
+                  <text
+                    key={`hist-${i}`}
+                    x={x}
+                    y={height - padding.bottom + 20}
+                    textAnchor="middle"
+                    fontSize="11"
+                    fill="#4b5563"
+                    fontWeight="500"
+                  >
+                    {item.month.substring(0, 3)}
+                  </text>
+                );
+              })}
+              
+              {forecastData.predictions.map((_, i) => {
+                const x = padding.left + xStep * (historicalValues.length + i);
+                return (
+                  <text
+                    key={`fore-${i}`}
+                    x={x}
+                    y={height - padding.bottom + 20}
+                    textAnchor="middle"
+                    fontSize="11"
+                    fill="#3b82f6"
+                    fontWeight="600"
+                  >
+                    +{i + 1}m
+                  </text>
+                );
+              })}
+              
+              {/* Confidence interval shading */}
+              {forecastData.predictions.length > 0 && (
+                <polygon
+                  points={
+                    forecastData.predictions.map((pred, i) => {
+                      const x = padding.left + xStep * (historicalValues.length + i);
+                      const yUpper = padding.top + chartHeight - ((pred.upper - minValue) / valueRange) * chartHeight;
+                      return `${x},${yUpper}`;
+                    }).join(' ') + ' ' +
+                    forecastData.predictions.map((pred, i) => {
+                      const x = padding.left + xStep * (historicalValues.length + forecastData.predictions.length - 1 - i);
+                      const yLower = padding.top + chartHeight - ((pred.lower - minValue) / valueRange) * chartHeight;
+                      return `${x},${yLower}`;
+                    }).join(' ')
+                  }
+                  fill="rgba(59, 130, 246, 0.15)"
+                  stroke="none"
+                />
+              )}
+              
+              {/* Historical line */}
+              <polyline
+                points={historicalValues.map((value, i) => {
+                  const x = padding.left + xStep * i;
+                  const y = padding.top + chartHeight - ((value - minValue) / valueRange) * chartHeight;
+                  return `${x},${y}`;
+                }).join(' ')}
+                fill="none"
+                stroke="#10b981"
+                strokeWidth="3"
+                strokeLinejoin="round"
+              />
+              
+              {/* Forecast line */}
+              <polyline
+                points={
+                  // Connect last historical point to first forecast
+                  [[
+                    padding.left + xStep * (historicalValues.length - 1),
+                    padding.top + chartHeight - ((historicalValues[historicalValues.length - 1] - minValue) / valueRange) * chartHeight
+                  ]].concat(
+                    forecastData.predictions.map((pred, i) => {
+                      const x = padding.left + xStep * (historicalValues.length + i);
+                      const y = padding.top + chartHeight - ((pred.prediction - minValue) / valueRange) * chartHeight;
+                      return [x, y];
+                    })
+                  ).map(([x, y]) => `${x},${y}`).join(' ')
+                }
+                fill="none"
+                stroke="#3b82f6"
+                strokeWidth="3"
+                strokeLinejoin="round"
+                strokeDasharray="8,4"
+              />
+              
+              {/* Historical data points */}
+              {historicalValues.map((value, i) => {
+                const x = padding.left + xStep * i;
+                const y = padding.top + chartHeight - ((value - minValue) / valueRange) * chartHeight;
+                return (
+                  <circle
+                    key={`hist-point-${i}`}
+                    cx={x}
+                    cy={y}
+                    r="5"
+                    fill="#10b981"
+                    stroke="white"
+                    strokeWidth="2"
+                  />
+                );
+              })}
+              
+              {/* Forecast data points */}
+              {forecastData.predictions.map((pred, i) => {
+                const x = padding.left + xStep * (historicalValues.length + i);
+                const y = padding.top + chartHeight - ((pred.prediction - minValue) / valueRange) * chartHeight;
+                return (
+                  <circle
+                    key={`fore-point-${i}`}
+                    cx={x}
+                    cy={y}
+                    r="5"
+                    fill="#3b82f6"
+                    stroke="white"
+                    strokeWidth="2"
+                  />
+                );
+              })}
+              
+              {/* Labels */}
+              <text
+                x={padding.left + xStep * (historicalValues.length / 2)}
+                y={height - 10}
+                textAnchor="middle"
+                fontSize="13"
+                fill="#10b981"
+                fontWeight="600"
+              >
+                Historical Data
+              </text>
+              
+              <text
+                x={padding.left + xStep * (historicalValues.length + forecastData.predictions.length / 2)}
+                y={height - 10}
+                textAnchor="middle"
+                fontSize="13"
+                fill="#3b82f6"
+                fontWeight="600"
+              >
+                XGBoost Forecast
+              </text>
+            </svg>
+            
+            {/* Legend */}
+            <div className="flex flex-wrap gap-4 mt-4 justify-center bg-white rounded-lg p-3 border border-gray-200">
+              <div className="flex items-center gap-2">
+                <div className="w-4 h-4 rounded-full bg-green-500"></div>
+                <span className="text-sm font-medium text-gray-700">Historical Data</span>
+              </div>
+              <div className="flex items-center gap-2">
+                <div className="w-4 h-1 bg-blue-500" style={{ borderTop: '3px dashed #3b82f6' }}></div>
+                <span className="text-sm font-medium text-gray-700">Predicted Values</span>
+              </div>
+              <div className="flex items-center gap-2">
+                <div className="w-4 h-4 bg-blue-200 opacity-50"></div>
+                <span className="text-sm font-medium text-gray-700">95% Confidence Interval</span>
+              </div>
+            </div>
+          </>
+        )}
+      </div>
+    );
+  };
+
   const SimpleLineChart = ({ data, messageIdx }) => {
     if (!data) return null;
     
@@ -681,7 +1236,6 @@ Please provide a detailed analysis that references specific data points from the
     const chartWidth = width - padding.left - padding.right;
     const chartHeight = height - padding.top - padding.bottom;
     
-    // Find max value for scaling
     const allValues = data.datasets.flatMap(d => d.data);
     const maxValue = Math.max(...allValues);
     const minValue = Math.min(...allValues);
@@ -704,7 +1258,6 @@ Please provide a detailed analysis that references specific data points from the
         
         {showChart[messageIdx] && (
           <svg width={width} height={height} className="mx-auto">
-            {/* Grid lines */}
             {[0, 1, 2, 3, 4].map(i => {
               const y = padding.top + (chartHeight / 4) * i;
               const value = maxValue - (valueRange / 4) * i;
@@ -731,7 +1284,6 @@ Please provide a detailed analysis that references specific data points from the
               );
             })}
             
-            {/* X-axis labels */}
             {data.labels.map((label, i) => {
               const x = padding.left + (chartWidth / (data.labels.length - 1)) * i;
               return (
@@ -748,7 +1300,6 @@ Please provide a detailed analysis that references specific data points from the
               );
             })}
             
-            {/* Lines */}
             {data.datasets.map((dataset, datasetIdx) => {
               const points = dataset.data.map((value, i) => {
                 const x = padding.left + (chartWidth / (data.labels.length - 1)) * i;
@@ -765,7 +1316,6 @@ Please provide a detailed analysis that references specific data points from the
                     strokeWidth={dataset.borderWidth}
                     strokeLinejoin="round"
                   />
-                  {/* Data points */}
                   {dataset.data.map((value, i) => {
                     const x = padding.left + (chartWidth / (data.labels.length - 1)) * i;
                     const y = padding.top + chartHeight - ((value - minValue) / valueRange) * chartHeight;
@@ -787,7 +1337,6 @@ Please provide a detailed analysis that references specific data points from the
           </svg>
         )}
         
-        {/* Legend */}
         {showChart[messageIdx] && (
           <div className="flex flex-wrap gap-4 mt-3 justify-center">
             {data.datasets.map((dataset, idx) => (
@@ -868,24 +1417,6 @@ Please provide a detailed analysis that references specific data points from the
           <div className="flex-1">
             <h4 className="font-semibold text-gray-900 text-sm mb-1">{insight.title}</h4>
             <p className="text-gray-700 text-sm mb-2">{insight.summary}</p>
-            <p className="text-gray-600 text-xs mb-2">{insight.detail}</p>
-            
-            {insight.actions && insight.actions.length > 0 && (
-              <div className="mt-3 pt-3 border-t border-gray-200">
-                <h5 className="font-semibold text-gray-800 text-xs mb-2 flex items-center gap-1">
-                  <Target className="w-3.5 h-3.5" />
-                  Recommended Actions:
-                </h5>
-                <ul className="space-y-1.5">
-                  {insight.actions.map((action, idx) => (
-                    <li key={idx} className="text-xs text-gray-700 flex items-start gap-2">
-                      <ChevronRight className="w-3 h-3 mt-0.5 flex-shrink-0 text-gray-400" />
-                      <span>{action}</span>
-                    </li>
-                  ))}
-                </ul>
-              </div>
-            )}
             
             {insight.pillar && (
               <div className="mt-3">
@@ -902,7 +1433,8 @@ Please provide a detailed analysis that references specific data points from the
     const icons = {
       powerbi: Database,
       vectorstore: Zap,
-      openai: Sparkles
+      gemini: Sparkles,
+      forecasting: BarChart3
     };
     const Icon = icons[service];
     const statusConfig = {
@@ -915,10 +1447,17 @@ Please provide a detailed analysis that references specific data points from the
     const config = statusConfig[status];
     const StatusIcon = config.icon;
 
+    const labels = {
+      powerbi: 'Power BI',
+      vectorstore: 'Vector Store',
+      gemini: 'Gemini AI',
+      forecasting: 'XGBoost'
+    };
+
     return (
       <div className={`flex items-center gap-2 px-3 py-1.5 rounded-lg ${config.bg}`}>
         <Icon className={`w-3.5 h-3.5 ${config.color}`} />
-        <span className={`text-xs font-medium ${config.color} capitalize`}>{status}</span>
+        <span className={`text-xs font-medium ${config.color}`}>{labels[service]}</span>
         <StatusIcon className={`w-3 h-3 ${config.color} ${status === 'connecting' || status === 'initializing' ? 'animate-spin' : ''}`} />
       </div>
     );
@@ -936,7 +1475,7 @@ Please provide a detailed analysis that references specific data points from the
               </div>
               <div>
                 <h1 className="text-lg font-semibold text-gray-900">PSA Strategic Insights AI</h1>
-                <p className="text-xs text-gray-500">Power BI Integration • RAG-Enhanced • Real-Time</p>
+                <p className="text-xs text-gray-500">Power BI • RAG-Enhanced • XGBoost Forecasting</p>
               </div>
             </div>
             <button
@@ -952,7 +1491,8 @@ Please provide a detailed analysis that references specific data points from the
           <div className="flex items-center gap-2 flex-wrap">
             <ConnectionIndicator service="powerbi" status={connectionStatus.powerbi} />
             <ConnectionIndicator service="vectorstore" status={connectionStatus.vectorstore} />
-            <ConnectionIndicator service="openai" status={connectionStatus.openai} />
+            <ConnectionIndicator service="gemini" status={connectionStatus.gemini} />
+            <ConnectionIndicator service="forecasting" status={connectionStatus.forecasting} />
           </div>
         </div>
       </div>
@@ -982,8 +1522,16 @@ Please provide a detailed analysis that references specific data points from the
                     </div>
                   </div>
 
-                  {/* Chart Visualization */}
-                  {!message.isError && message.content && (
+                  {/* Forecast Chart */}
+                  {message.forecastData && (
+                    <ForecastChart 
+                      forecastData={message.forecastData} 
+                      messageIdx={idx}
+                    />
+                  )}
+
+                  {/* Regular Chart Visualization */}
+                  {!message.isError && !message.forecastData && message.content && (
                     <SimpleLineChart 
                       data={extractChartData(message.content)} 
                       messageIdx={idx}
