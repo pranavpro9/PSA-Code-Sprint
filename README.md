@@ -239,7 +239,7 @@ This project is private and proprietary.
 
 ## 👥 Contributors
 
-- PSA Code Sprint Team
+- Team Tembusu Meal Enhancements (Min Wenn, Pranav, Han Sheng)
 
 ## 📞 Support
 
