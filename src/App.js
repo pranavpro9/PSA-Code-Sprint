@@ -1,13 +1,14 @@
-import React, { useState, useRef, useEffect } from 'react';
+import React, { useState, useRef, useEffect, useCallback } from 'react';
 import { Send, Sparkles, RefreshCw, TrendingUp, AlertTriangle, Target, Leaf, Users, Network, ChevronRight, Info, Database, Zap, CheckCircle, XCircle } from 'lucide-react';
 
-// Configuration
-const OPENAI_API_KEY = 'your-openai-api-key-here';
+// Configuration from environment variables
+const GEMINI_API_KEY = process.env.REACT_APP_GEMINI_API_KEY;
 const POWERBI_CONFIG = {
-  clientId: 'your-azure-app-client-id',
-  tenantId: 'your-tenant-id',
-  workspaceId: 'your-workspace-id',
-  datasetId: 'your-dataset-id'
+  clientId: process.env.REACT_APP_POWERBI_CLIENT_ID,
+  tenantId: process.env.REACT_APP_POWERBI_TENANT_ID,
+  workspaceId: process.env.REACT_APP_POWERBI_WORKSPACE_ID,
+  datasetId: process.env.REACT_APP_POWERBI_DATASET_ID,
+  clientSecret: process.env.REACT_APP_POWERBI_CLIENT_SECRET
 };
 
 // PSA Strategy Pillars
@@ -91,6 +92,7 @@ function App() {
   const [isLoading, setIsLoading] = useState(false);
   const [hoveredPillar, setHoveredPillar] = useState(null);
   const [powerBIData, setPowerBIData] = useState(null);
+  const [showChart, setShowChart] = useState({});
   const [connectionStatus, setConnectionStatus] = useState({
     powerbi: 'disconnected',
     vectorstore: 'initializing',
@@ -98,6 +100,7 @@ function App() {
   });
   const messagesEndRef = useRef(null);
   const vectorStore = useRef(new VectorStore());
+  
 
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -114,78 +117,12 @@ function App() {
 
   const initializeVectorStore = async () => {
     try {
-      // Add historical performance data to vector store
-      const historicalDocs = [
-        {
-          type: 'metric',
-          category: 'port_time_savings',
-          content: 'Port Time Savings in May 2025 achieved 20% reduction vs baseline, the highest performance of the year. Contributing factors: optimized berth allocation, reduced vessel waiting times, efficient cargo handling operations.',
-          metadata: { month: 'May', value: 20, metric: 'port_time_savings' }
-        },
-        {
-          type: 'metric',
-          category: 'arrival_accuracy',
-          content: 'Arrival Accuracy peaked at 82% in April 2025. This was achieved through enhanced predictive analytics, improved weather forecasting integration, and better coordination with shipping lines.',
-          metadata: { month: 'April', value: 82, metric: 'arrival_accuracy' }
-        },
-        {
-          type: 'metric',
-          category: 'arrival_accuracy',
-          content: 'Arrival Accuracy N category consistently underperforms at 18-39% range. Root causes: inadequate buffer times, poor schedule coordination, vessel-specific operational constraints, lack of real-time tracking.',
-          metadata: { category: 'N', range: '18-39%', metric: 'arrival_accuracy' }
-        },
-        {
-          type: 'metric',
-          category: 'bunker_savings',
-          content: 'Bunker Savings reached $0.95M in May 2025 through optimized vessel speed management, reduced idle times, and just-in-time arrival coordination. This represents 58% above monthly average.',
-          metadata: { month: 'May', value: 0.95, metric: 'bunker_savings' }
-        },
-        {
-          type: 'metric',
-          category: 'carbon_abatement',
-          content: 'Carbon Abatement achieved 8.6K tonnes in May 2025 and 8.5K tonnes in July 2025. Success factors: reduced vessel idle time, optimized berth allocation, efficient port operations reducing overall emissions.',
-          metadata: { months: ['May', 'July'], values: [8.6, 8.5], metric: 'carbon_abatement' }
-        },
-        {
-          type: 'insight',
-          category: 'correlation',
-          content: 'Strong correlation observed between port time savings and carbon abatement. Months with 18%+ port time savings (May, August) also show 7K+ tonnes carbon reduction. This validates that operational efficiency directly supports sustainability goals.',
-          metadata: { correlation: 'port_time_carbon', strength: 'strong' }
-        },
-        {
-          type: 'anomaly',
-          category: 'arrival_accuracy',
-          content: 'September 2025 arrival accuracy dropped to 61% from 79% in August, representing an 18-point decline. Preliminary investigation suggests: seasonal weather patterns, increased vessel traffic, maintenance schedules at key terminals.',
-          metadata: { month: 'September', value: 61, change: -18, metric: 'arrival_accuracy' }
-        },
-        {
-          type: 'benchmark',
-          category: 'targets',
-          content: 'Performance targets: Port Time Savings 18%, Arrival Accuracy 80%, Bunker Savings $0.8M/month, Carbon Abatement 8K tonnes/month. Current 9-month performance: 3 of 9 months met all targets, 6 of 9 months met 2-3 targets.',
-          metadata: { type: 'targets' }
-        }
-      ];
-
-      for (const doc of historicalDocs) {
-        await vectorStore.current.addDocument(doc);
-      }
-
       setConnectionStatus(prev => ({ ...prev, vectorstore: 'connected' }));
       
       // Initialize welcome message
       setMessages([{
         type: 'assistant',
-        content: 'Hello! I\'m your PSA Strategic Insights AI with real-time Power BI integration and intelligent data retrieval.\n\nI can analyze live dashboard data, retrieve historical context, and provide strategic recommendations.',
-        insights: [
-          {
-            type: 'proactive',
-            title: '⚡ System Ready',
-            summary: 'Vector store initialized with 8 historical documents',
-            impact: 'medium',
-            pillar: 'digital',
-            detail: 'RAG system ready for context-aware analysis with historical performance data.'
-          }
-        ]
+        content: 'Hello! I\'m your PSA Strategic Insights AI with real-time dashboard integration.\n\nI have access to your network performance data and can provide insights on port operations, arrival accuracy, sustainability metrics, and strategic recommendations. Ask me anything!'
       }]);
     } catch (error) {
       console.error('Vector store initialization error:', error);
@@ -193,13 +130,111 @@ function App() {
     }
   };
 
-  // Power BI API Integration
-  const fetchPowerBIData = async () => {
+  // Proactive Anomaly Detection
+  const detectAnomalies = useCallback((data) => {
+    const insights = [];
+    const rows = data.results[0].tables[0].rows;
+    
+    if (rows.length < 2) return insights;
+
+    const current = rows[0];
+    const previous = rows[1];
+    const allRows = rows;
+
+    // Calculate averages for benchmarking
+    const avgPortTime = allRows.reduce((sum, r) => sum + r.PortTimeSavings, 0) / allRows.length;
+    const avgCarbon = allRows.reduce((sum, r) => sum + r.CarbonAbatement, 0) / allRows.length;
+
+    // Detect significant drops in Arrival Accuracy
+    const arrivalDrop = previous.ArrivalAccuracy - current.ArrivalAccuracy;
+    if (arrivalDrop > 15) {
+      insights.push({
+        type: 'anomaly',
+        title: '🚨 Critical: Arrival Accuracy Declined',
+        summary: `Arrival accuracy dropped ${arrivalDrop.toFixed(0)}% from ${previous.ArrivalAccuracy}% (${previous['Date[Month]']}) to ${current.ArrivalAccuracy}% (${current['Date[Month]']})`,
+        impact: 'high',
+        pillar: 'customer',
+        detail: `This decline affects service predictability and customer satisfaction.`,
+        actions: [
+          'Review vessel schedule coordination with shipping lines',
+          'Analyze weather pattern impacts for the period',
+          'Check terminal maintenance schedules for conflicts',
+          'Implement enhanced buffer times for high-risk routes'
+        ]
+      });
+    }
+
+    // Detect below-average Port Time Savings
+    if (current.PortTimeSavings < avgPortTime - 5) {
+      insights.push({
+        type: 'anomaly',
+        title: '⚠️ Port Time Savings Below Target',
+        summary: `Current port time savings (${current.PortTimeSavings}%) is ${(avgPortTime - current.PortTimeSavings).toFixed(1)}% below network average (${avgPortTime.toFixed(1)}%)`,
+        impact: 'medium',
+        pillar: 'operational',
+        detail: `Operational efficiency has declined compared to historical performance.`,
+        actions: [
+          'Optimize berth allocation algorithms',
+          'Review vessel waiting times at key terminals',
+          'Analyze cargo handling bottlenecks',
+          'Deploy additional resources during peak periods'
+        ]
+      });
+    }
+
+    // Detect strong performance (positive insights)
+    if (current.CarbonAbatement > avgCarbon + 1) {
+      insights.push({
+        type: 'success',
+        title: '✅ Excellent: Carbon Abatement Exceeds Target',
+        summary: `Carbon abatement (${current.CarbonAbatement}K tonnes) is ${((current.CarbonAbatement - avgCarbon) / avgCarbon * 100).toFixed(0)}% above average`,
+        impact: 'low',
+        pillar: 'sustainability',
+        detail: `Strong sustainability performance demonstrates effective emissions reduction strategies.`,
+        actions: [
+          'Document successful practices for replication',
+          'Share best practices across terminal network',
+          'Consider expanding initiatives to other regions',
+          'Report achievements to stakeholders'
+        ]
+      });
+    }
+
+    // Detect correlation opportunities
+    if (current.PortTimeSavings > 18 && current.CarbonAbatement > 7) {
+      insights.push({
+        type: 'insight',
+        title: '💡 Insight: Efficiency Drives Sustainability',
+        summary: `High port time savings (${current.PortTimeSavings}%) correlates with strong carbon abatement (${current.CarbonAbatement}K tonnes)`,
+        impact: 'medium',
+        pillar: 'digital',
+        detail: `Operational excellence directly supports sustainability goals through reduced idle times.`,
+        actions: [
+          'Continue optimizing vessel turnaround times',
+          'Invest in predictive berth allocation systems',
+          'Implement just-in-time arrival coordination',
+          'Monitor and maintain this positive correlation'
+        ]
+      });
+    }
+
+    return insights;
+  }, []);
+
+  // Power BI Data Integration
+  const loadPowerBIData = useCallback(async () => {
     try {
       setConnectionStatus(prev => ({ ...prev, powerbi: 'connecting' }));
+      
+      // Check if Power BI credentials are configured
+      if (!POWERBI_CONFIG.clientId || !POWERBI_CONFIG.tenantId) {
+        console.log('Power BI credentials not configured, using demo data');
+        return loadDemoData();
+      }
 
-      // Step 1: Get Access Token (using MSAL or direct auth)
-      // In production, implement proper OAuth flow
+      console.log('Attempting to connect to Power BI...');
+      
+      // Step 1: Get Access Token
       const tokenResponse = await fetch(`https://login.microsoftonline.com/${POWERBI_CONFIG.tenantId}/oauth2/v2.0/token`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
@@ -207,34 +242,36 @@ function App() {
           client_id: POWERBI_CONFIG.clientId,
           scope: 'https://analysis.windows.net/powerbi/api/.default',
           grant_type: 'client_credentials',
-          client_secret: 'your-client-secret' // Store securely
+          client_secret: POWERBI_CONFIG.clientSecret
         })
       });
 
       if (!tokenResponse.ok) {
-        throw new Error('Failed to authenticate with Power BI');
+        const error = await tokenResponse.text();
+        console.error('Power BI authentication failed:', error);
+        console.log('Falling back to demo data');
+        return loadDemoData();
       }
 
       const { access_token } = await tokenResponse.json();
+      console.log('✅ Power BI authentication successful');
 
-      // Step 2: Execute DAX Query to get dashboard data
+      // Step 2: Execute DAX Query
       const daxQuery = {
-        queries: [
-          {
-            query: `
-              EVALUATE
-              SUMMARIZECOLUMNS(
-                'Date'[Month],
-                "PortTimeSavings", AVERAGE('Metrics'[PortTimeSavings]),
-                "ArrivalAccuracy", AVERAGE('Metrics'[ArrivalAccuracy]),
-                "BunkerSavings", SUM('Metrics'[BunkerSavings]),
-                "CarbonAbatement", SUM('Metrics'[CarbonAbatement]),
-                "TotalCalls", COUNT('Metrics'[CallID])
-              )
-              ORDER BY 'Date'[Month] DESC
-            `
-          }
-        ]
+        queries: [{
+          query: `
+            EVALUATE
+            SUMMARIZECOLUMNS(
+              'Date'[Month],
+              "PortTimeSavings", AVERAGE('Metrics'[PortTimeSavings]),
+              "ArrivalAccuracy", AVERAGE('Metrics'[ArrivalAccuracy]),
+              "BunkerSavings", SUM('Metrics'[BunkerSavings]),
+              "CarbonAbatement", SUM('Metrics'[CarbonAbatement]),
+              "TotalCalls", COUNT('Metrics'[CallID])
+            )
+            ORDER BY 'Date'[Month] DESC
+          `
+        }]
       };
 
       const dataResponse = await fetch(
@@ -250,28 +287,39 @@ function App() {
       );
 
       if (!dataResponse.ok) {
-        throw new Error('Failed to fetch Power BI data');
+        const error = await dataResponse.text();
+        console.error('Power BI data fetch failed:', error);
+        console.log('Falling back to demo data');
+        return loadDemoData();
       }
 
       const data = await dataResponse.json();
+      console.log('✅ Successfully fetched Power BI data');
+      
       setPowerBIData(data);
       setConnectionStatus(prev => ({ ...prev, powerbi: 'connected' }));
-
-      // Store fresh data in vector store
-      await storeDataInVectorStore(data);
-
+      storeDataInVectorStore(data);
+      
+      // Run proactive anomaly detection
+      const anomalies = detectAnomalies(data);
+      if (anomalies.length > 0) {
+        setMessages(prev => [...prev, {
+          type: 'assistant',
+          content: 'I\'ve analyzed your live Power BI dashboard data and detected some important patterns:',
+          insights: anomalies
+        }]);
+      }
+      
       return data;
     } catch (error) {
-      console.error('Power BI fetch error:', error);
-      setConnectionStatus(prev => ({ ...prev, powerbi: 'error' }));
-      
-      // Fallback to simulated data for demo
-      return simulatePowerBIData();
+      console.error('Power BI connection error:', error);
+      console.log('Falling back to demo data');
+      return loadDemoData();
     }
-  };
+  }, [detectAnomalies]);
 
-  // Simulate Power BI data for demo purposes
-  const simulatePowerBIData = () => {
+  // Demo data fallback
+  const loadDemoData = useCallback(() => {
     const data = {
       results: [{
         tables: [{
@@ -289,8 +337,10 @@ function App() {
     setPowerBIData(data);
     setConnectionStatus(prev => ({ ...prev, powerbi: 'connected' }));
     storeDataInVectorStore(data);
+    
     return data;
-  };
+  }, []);
+
 
   // Store Power BI data in vector store
   const storeDataInVectorStore = async (data) => {
@@ -322,13 +372,13 @@ function App() {
     }
   };
 
-  // Initialize Power BI connection on mount
+
+  // Initialize Power BI data on mount
   useEffect(() => {
-    // Simulate Power BI connection (in demo mode)
     setTimeout(() => {
-      simulatePowerBIData();
+      loadPowerBIData();
     }, 1000);
-  }, []);
+  }, [loadPowerBIData]);
 
   // Build context with RAG
   const buildRAGContext = async (query) => {
@@ -370,35 +420,49 @@ Provide analysis that:
 - Uses actual numbers from the data`;
   };
 
-  const callOpenAI = async (userMessage) => {
+  const callGeminiAI = async (userMessage) => {
     try {
       setConnectionStatus(prev => ({ ...prev, openai: 'connecting' }));
       
+      if (!GEMINI_API_KEY) {
+        throw new Error('Gemini API key not configured. Please add REACT_APP_GEMINI_API_KEY to your .env file.');
+      }
+
       const contextWithRAG = await buildRAGContext(userMessage);
 
-      const response = await fetch('https://api.openai.com/v1/chat/completions', {
+      const prompt = `${contextWithRAG}
+
+User Question: ${userMessage}
+
+Please provide a detailed analysis that references specific data points from the context above.`;
+
+      const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${GEMINI_API_KEY}`, {
         method: 'POST',
         headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${OPENAI_API_KEY}`
+          'Content-Type': 'application/json'
         },
         body: JSON.stringify({
-          model: 'gpt-4o-mini',
-          messages: [
-            { role: 'system', content: contextWithRAG },
-            { role: 'user', content: userMessage }
-          ],
-          temperature: 0.7,
-          max_tokens: 2000
+          contents: [{
+            parts: [{
+              text: prompt
+            }]
+          }],
+          generationConfig: {
+            temperature: 0.7,
+            maxOutputTokens: 2000,
+            topP: 0.8,
+            topK: 40
+          }
         })
       });
 
       if (!response.ok) {
-        throw new Error('OpenAI API request failed');
+        const errorData = await response.json();
+        throw new Error(`Gemini API request failed: ${errorData.error?.message || response.statusText}`);
       }
 
       const data = await response.json();
-      const content = data.choices[0].message.content;
+      const content = data.candidates?.[0]?.content?.parts?.[0]?.text || 'No response generated';
       
       setConnectionStatus(prev => ({ ...prev, openai: 'connected' }));
 
@@ -416,11 +480,11 @@ Provide analysis that:
         pillars: [...new Set(pillars)]
       };
     } catch (err) {
-      console.error('OpenAI API Error:', err);
+      console.error('Gemini API Error:', err);
       setConnectionStatus(prev => ({ ...prev, openai: 'error' }));
       return {
         type: 'error',
-        content: `Error: ${err.message}. Using cached data for analysis.`,
+        content: `Error: ${err.message}`,
         pillars: []
       };
     }
@@ -434,7 +498,7 @@ Provide analysis that:
     setInput('');
     setIsLoading(true);
 
-    const response = await callOpenAI(userMessage);
+    const response = await callGeminiAI(userMessage);
     
     setMessages(prev => [...prev, { 
       type: 'assistant', 
@@ -457,6 +521,288 @@ Provide analysis that:
       type: 'assistant',
       content: 'Chat reset. Ready for new analysis with live Power BI data and historical context.'
     }]);
+    setShowChart({});
+  };
+
+  // Extract chart data from AI response
+  const extractChartData = (content) => {
+    if (!powerBIData?.results?.[0]?.tables?.[0]?.rows) return null;
+    
+    const rows = powerBIData.results[0].tables[0].rows;
+    const contentLower = content.toLowerCase();
+    
+    // Don't show chart for welcome messages or short responses
+    if (content.length < 100 || contentLower.includes('hello') || contentLower.includes('ask me anything')) {
+      return null;
+    }
+    
+    // Detect what metrics are mentioned with specific context
+    const metrics = {
+      portTimeSavings: (contentLower.includes('port time') && contentLower.includes('%')) || 
+                       (contentLower.includes('savings') && contentLower.includes('port')),
+      arrivalAccuracy: (contentLower.includes('arrival') && contentLower.includes('accuracy')) ||
+                       (contentLower.includes('arrival') && contentLower.includes('%')),
+      bunkerSavings: contentLower.includes('bunker') || 
+                     (contentLower.includes('fuel') && contentLower.includes('savings')),
+      carbonAbatement: (contentLower.includes('carbon') && contentLower.includes('abatement')) ||
+                       (contentLower.includes('carbon') && contentLower.includes('tonnes'))
+    };
+    
+    // Count how many metrics are mentioned
+    const mentionedMetrics = Object.entries(metrics).filter(([_, mentioned]) => mentioned);
+    
+    if (mentionedMetrics.length === 0) return null;
+    
+    // Prepare chart data
+    return {
+      labels: rows.map(r => r['Date[Month]']).reverse(),
+      datasets: mentionedMetrics.map(([key, _], idx) => {
+        const colors = {
+          portTimeSavings: { bg: 'rgba(59, 130, 246, 0.5)', border: 'rgb(59, 130, 246)', label: 'Port Time Savings (%)' },
+          arrivalAccuracy: { bg: 'rgba(16, 185, 129, 0.5)', border: 'rgb(16, 185, 129)', label: 'Arrival Accuracy (%)' },
+          bunkerSavings: { bg: 'rgba(245, 158, 11, 0.5)', border: 'rgb(245, 158, 11)', label: 'Bunker Savings ($M)' },
+          carbonAbatement: { bg: 'rgba(34, 197, 94, 0.5)', border: 'rgb(34, 197, 94)', label: 'Carbon Abatement (K tonnes)' }
+        };
+        
+        const color = colors[key];
+        const dataKey = key === 'portTimeSavings' ? 'PortTimeSavings' :
+                       key === 'arrivalAccuracy' ? 'ArrivalAccuracy' :
+                       key === 'bunkerSavings' ? 'BunkerSavings' : 'CarbonAbatement';
+        
+        return {
+          label: color.label,
+          data: rows.map(r => r[dataKey]).reverse(),
+          backgroundColor: color.bg,
+          borderColor: color.border,
+          borderWidth: 2,
+          tension: 0.4
+        };
+      })
+    };
+  };
+
+  // Format AI response with better structure and styling
+  const formatAIResponse = (content) => {
+    // Helper function to parse inline bold text
+    const parseInlineBold = (text) => {
+      const parts = [];
+      let lastIndex = 0;
+      const regex = /\*\*(.*?)\*\*/g;
+      let match;
+
+      while ((match = regex.exec(text)) !== null) {
+        // Add text before the bold
+        if (match.index > lastIndex) {
+          parts.push(text.substring(lastIndex, match.index));
+        }
+        // Add bold text
+        parts.push(<strong key={match.index} className="font-semibold text-gray-900">{match[1]}</strong>);
+        lastIndex = regex.lastIndex;
+      }
+      
+      // Add remaining text
+      if (lastIndex < text.length) {
+        parts.push(text.substring(lastIndex));
+      }
+      
+      return parts.length > 0 ? parts : text;
+    };
+
+    const lines = content.split('\n');
+    const formatted = [];
+    let currentList = [];
+    let inList = false;
+
+    lines.forEach((line, idx) => {
+      const trimmed = line.trim();
+      
+      // Headers (##)
+      if (trimmed.startsWith('##')) {
+        if (inList) {
+          formatted.push(<ul key={`list-${idx}`} className="space-y-2 my-3 ml-4">{currentList}</ul>);
+          currentList = [];
+          inList = false;
+        }
+        const headerText = trimmed.replace(/^##\s*/, '');
+        formatted.push(
+          <h3 key={idx} className="text-lg font-bold text-gray-900 mt-4 mb-2 flex items-center gap-2">
+            <span className="w-1 h-5 bg-blue-600 rounded"></span>
+            {parseInlineBold(headerText)}
+          </h3>
+        );
+      }
+      // List items (numbered or bulleted)
+      else if (trimmed.match(/^(\d+\.|-|\*)\s/)) {
+        inList = true;
+        const text = trimmed.replace(/^(\d+\.|-|\*)\s/, '');
+        currentList.push(
+          <li key={`item-${idx}`} className="flex items-start gap-2 text-gray-700">
+            <span className="text-blue-600 font-bold mt-0.5">•</span>
+            <span>{parseInlineBold(text)}</span>
+          </li>
+        );
+      }
+      // Regular paragraphs
+      else if (trimmed) {
+        if (inList) {
+          formatted.push(<ul key={`list-${idx}`} className="space-y-2 my-3 ml-4">{currentList}</ul>);
+          currentList = [];
+          inList = false;
+        }
+        formatted.push(
+          <p key={idx} className="mb-3 text-gray-700 leading-relaxed">
+            {parseInlineBold(trimmed)}
+          </p>
+        );
+      }
+      // Empty lines
+      else if (inList) {
+        formatted.push(<ul key={`list-${idx}`} className="space-y-2 my-3 ml-4">{currentList}</ul>);
+        currentList = [];
+        inList = false;
+      }
+    });
+
+    // Add remaining list items
+    if (currentList.length > 0) {
+      formatted.push(<ul key="list-final" className="space-y-2 my-3 ml-4">{currentList}</ul>);
+    }
+
+    return <div className="space-y-1">{formatted}</div>;
+  };
+
+  // Simple Line Chart Component
+  const SimpleLineChart = ({ data, messageIdx }) => {
+    if (!data) return null;
+    
+    const width = 700;
+    const height = 300;
+    const padding = { top: 20, right: 20, bottom: 40, left: 60 };
+    const chartWidth = width - padding.left - padding.right;
+    const chartHeight = height - padding.top - padding.bottom;
+    
+    // Find max value for scaling
+    const allValues = data.datasets.flatMap(d => d.data);
+    const maxValue = Math.max(...allValues);
+    const minValue = Math.min(...allValues);
+    const valueRange = maxValue - minValue;
+    
+    return (
+      <div className="mt-4 bg-white border border-gray-200 rounded-xl p-4 shadow-sm">
+        <div className="flex items-center justify-between mb-3">
+          <h4 className="text-sm font-semibold text-gray-900 flex items-center gap-2">
+            <TrendingUp className="w-4 h-4 text-blue-600" />
+            Data Visualization
+          </h4>
+          <button
+            onClick={() => setShowChart(prev => ({ ...prev, [messageIdx]: !prev[messageIdx] }))}
+            className="text-xs text-gray-500 hover:text-gray-700"
+          >
+            {showChart[messageIdx] ? 'Hide' : 'Show'} Chart
+          </button>
+        </div>
+        
+        {showChart[messageIdx] && (
+          <svg width={width} height={height} className="mx-auto">
+            {/* Grid lines */}
+            {[0, 1, 2, 3, 4].map(i => {
+              const y = padding.top + (chartHeight / 4) * i;
+              const value = maxValue - (valueRange / 4) * i;
+              return (
+                <g key={i}>
+                  <line
+                    x1={padding.left}
+                    y1={y}
+                    x2={width - padding.right}
+                    y2={y}
+                    stroke="#e5e7eb"
+                    strokeWidth="1"
+                  />
+                  <text
+                    x={padding.left - 10}
+                    y={y + 4}
+                    textAnchor="end"
+                    fontSize="11"
+                    fill="#6b7280"
+                  >
+                    {value.toFixed(1)}
+                  </text>
+                </g>
+              );
+            })}
+            
+            {/* X-axis labels */}
+            {data.labels.map((label, i) => {
+              const x = padding.left + (chartWidth / (data.labels.length - 1)) * i;
+              return (
+                <text
+                  key={i}
+                  x={x}
+                  y={height - padding.bottom + 20}
+                  textAnchor="middle"
+                  fontSize="11"
+                  fill="#6b7280"
+                >
+                  {label}
+                </text>
+              );
+            })}
+            
+            {/* Lines */}
+            {data.datasets.map((dataset, datasetIdx) => {
+              const points = dataset.data.map((value, i) => {
+                const x = padding.left + (chartWidth / (data.labels.length - 1)) * i;
+                const y = padding.top + chartHeight - ((value - minValue) / valueRange) * chartHeight;
+                return `${x},${y}`;
+              }).join(' ');
+              
+              return (
+                <g key={datasetIdx}>
+                  <polyline
+                    points={points}
+                    fill="none"
+                    stroke={dataset.borderColor}
+                    strokeWidth={dataset.borderWidth}
+                    strokeLinejoin="round"
+                  />
+                  {/* Data points */}
+                  {dataset.data.map((value, i) => {
+                    const x = padding.left + (chartWidth / (data.labels.length - 1)) * i;
+                    const y = padding.top + chartHeight - ((value - minValue) / valueRange) * chartHeight;
+                    return (
+                      <circle
+                        key={i}
+                        cx={x}
+                        cy={y}
+                        r="4"
+                        fill={dataset.borderColor}
+                        stroke="white"
+                        strokeWidth="2"
+                      />
+                    );
+                  })}
+                </g>
+              );
+            })}
+          </svg>
+        )}
+        
+        {/* Legend */}
+        {showChart[messageIdx] && (
+          <div className="flex flex-wrap gap-4 mt-3 justify-center">
+            {data.datasets.map((dataset, idx) => (
+              <div key={idx} className="flex items-center gap-2">
+                <div
+                  className="w-3 h-3 rounded-full"
+                  style={{ backgroundColor: dataset.borderColor }}
+                />
+                <span className="text-xs text-gray-600">{dataset.label}</span>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+    );
   };
 
   const StrategyPillarBadge = ({ pillarKey }) => {
@@ -493,18 +839,59 @@ Provide analysis that:
   };
 
   const ProactiveInsight = ({ insight }) => {
-    const Icon = insight.type === 'proactive' ? AlertTriangle : TrendingUp;
-    const colors = insight.impact === 'high' ? 'border-red-300 bg-red-50' : insight.impact === 'medium' ? 'border-blue-300 bg-blue-50' : 'border-green-300 bg-green-50';
+    const iconMap = {
+      'proactive': AlertTriangle,
+      'anomaly': AlertTriangle,
+      'success': CheckCircle,
+      'insight': TrendingUp
+    };
+    const Icon = iconMap[insight.type] || TrendingUp;
+    
+    const colorMap = {
+      'high': 'border-red-300 bg-red-50',
+      'medium': 'border-blue-300 bg-blue-50',
+      'low': 'border-green-300 bg-green-50'
+    };
+    const colors = colorMap[insight.impact] || 'border-gray-300 bg-gray-50';
+    
+    const iconColorMap = {
+      'high': 'text-red-600',
+      'medium': 'text-blue-600',
+      'low': 'text-green-600'
+    };
+    const iconColor = iconColorMap[insight.impact] || 'text-gray-600';
     
     return (
       <div className={`border-l-4 ${colors} p-4 rounded-r-lg mb-3`}>
         <div className="flex items-start gap-3">
-          <Icon className={`w-5 h-5 ${insight.impact === 'high' ? 'text-red-600' : insight.impact === 'medium' ? 'text-blue-600' : 'text-green-600'} mt-0.5 flex-shrink-0`} />
+          <Icon className={`w-5 h-5 ${iconColor} mt-0.5 flex-shrink-0`} />
           <div className="flex-1">
             <h4 className="font-semibold text-gray-900 text-sm mb-1">{insight.title}</h4>
             <p className="text-gray-700 text-sm mb-2">{insight.summary}</p>
             <p className="text-gray-600 text-xs mb-2">{insight.detail}</p>
-            {insight.pillar && <StrategyPillarBadge pillarKey={insight.pillar} />}
+            
+            {insight.actions && insight.actions.length > 0 && (
+              <div className="mt-3 pt-3 border-t border-gray-200">
+                <h5 className="font-semibold text-gray-800 text-xs mb-2 flex items-center gap-1">
+                  <Target className="w-3.5 h-3.5" />
+                  Recommended Actions:
+                </h5>
+                <ul className="space-y-1.5">
+                  {insight.actions.map((action, idx) => (
+                    <li key={idx} className="text-xs text-gray-700 flex items-start gap-2">
+                      <ChevronRight className="w-3 h-3 mt-0.5 flex-shrink-0 text-gray-400" />
+                      <span>{action}</span>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
+            
+            {insight.pillar && (
+              <div className="mt-3">
+                <StrategyPillarBadge pillarKey={insight.pillar} />
+              </div>
+            )}
           </div>
         </div>
       </div>
@@ -589,11 +976,19 @@ Provide analysis that:
                     </div>
                   )}
 
-                  <div className={`${message.isError ? 'bg-red-50 border border-red-200 rounded-2xl p-4' : ''}`}>
-                    <div className={`text-[15px] leading-relaxed whitespace-pre-wrap ${message.isError ? 'text-red-800' : 'text-gray-800'}`}>
-                      {message.content}
+                  <div className={`${message.isError ? 'bg-red-50 border border-red-200 rounded-2xl p-4' : 'bg-gradient-to-br from-gray-50 to-white border border-gray-100 rounded-2xl p-5 shadow-sm'}`}>
+                    <div className={`text-[15px] leading-relaxed ${message.isError ? 'text-red-800' : 'text-gray-800'}`}>
+                      {formatAIResponse(message.content)}
                     </div>
                   </div>
+
+                  {/* Chart Visualization */}
+                  {!message.isError && message.content && (
+                    <SimpleLineChart 
+                      data={extractChartData(message.content)} 
+                      messageIdx={idx}
+                    />
+                  )}
 
                   {message.pillars && message.pillars.length > 0 && (
                     <div className="pt-2">
@@ -676,7 +1071,7 @@ Provide analysis that:
             </button>
           </div>
           <p className="text-xs text-gray-400 text-center mt-3">
-            AI-powered insights from OpenAI GPT-4
+            AI-powered insights from Google Gemini
           </p>
         </div>
       </div>
